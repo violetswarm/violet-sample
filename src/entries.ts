@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 export interface Entry {
   id: number;
@@ -31,11 +31,11 @@ export function validateEntry(entry: NewEntry): void {
   if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1]!) {
     throw new RangeError("date must be a real YYYY-MM-DD calendar date");
   }
-  if (typeof entry.project !== "string" || !entry.project.trim()) {
-    throw new RangeError("project must be nonempty");
+  if (typeof entry.project !== "string" || !entry.project.trim() || /[\t\r\n]/.test(entry.project)) {
+    throw new RangeError("project must be nonempty and contain no tabs or line breaks");
   }
-  if (typeof entry.note !== "string" || !entry.note.trim()) {
-    throw new RangeError("note must be nonempty");
+  if (typeof entry.note !== "string" || !entry.note.trim() || /[\t\r\n]/.test(entry.note)) {
+    throw new RangeError("note must be nonempty and contain no tabs or line breaks");
   }
   formatDuration(entry.seconds);
 }
@@ -84,27 +84,41 @@ export async function loadEntries(file: string): Promise<Entry[]> {
 
 export async function addEntry(file: string, input: NewEntry): Promise<Entry> {
   validateEntry(input);
-  const entries = await loadEntries(file);
-  const id = entries.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
-  if (!Number.isSafeInteger(id)) {
-    throw new RangeError("entry IDs exhausted");
-  }
-  const entry = { id, ...input };
-  const temporary = join(dirname(file), `.${basename(file)}.${randomUUID()}.tmp`);
+  const path = resolve(file);
+  const lock = `${path}.lock`;
   try {
-    await writeFile(temporary, JSON.stringify([...entries, entry], null, 2) + "\n", { flag: "wx" });
-    await rename(temporary, file);
+    await mkdir(lock);
   } catch (error) {
-    try {
-      await unlink(temporary);
-    } catch (cleanupError) {
-      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw cleanupError;
-      }
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`Another writer holds the entries lock: ${lock}`);
     }
     throw error;
   }
-  return entry;
+  try {
+    const entries = await loadEntries(path);
+    const id = entries.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
+    if (!Number.isSafeInteger(id)) {
+      throw new RangeError("entry IDs exhausted");
+    }
+    const entry = { id, ...input };
+    const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, JSON.stringify([...entries, entry], null, 2) + "\n", { flag: "wx" });
+      await rename(temporary, path);
+    } catch (error) {
+      try {
+        await unlink(temporary);
+      } catch (cleanupError) {
+        if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw cleanupError;
+        }
+      }
+      throw error;
+    }
+    return entry;
+  } finally {
+    await rmdir(lock);
+  }
 }
 
 export function summarize(entries: readonly Entry[]): { project: string; seconds: number }[] {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addEntry, formatDuration, loadEntries, summarize, validateEntry } from "./entries.ts";
@@ -35,8 +35,8 @@ describe("duration and validation", () => {
     }
     expect(() => validateEntry({ ...input, date: "2000-02-29" })).not.toThrow();
     expect(() => validateEntry({ ...input, date: "1900-02-29" })).toThrow(RangeError);
-    for (const project of ["", "   "]) expect(() => validateEntry({ ...input, project })).toThrow(RangeError);
-    for (const note of ["", "\t"]) expect(() => validateEntry({ ...input, note })).toThrow(RangeError);
+    for (const project of ["", "   ", "bad\tproject", "bad\rproject", "bad\nproject"]) expect(() => validateEntry({ ...input, project })).toThrow(RangeError);
+    for (const note of ["", "\t", "bad\tnote", "bad\rnote", "bad\nnote"]) expect(() => validateEntry({ ...input, note })).toThrow(RangeError);
   });
 });
 
@@ -108,5 +108,47 @@ test("CLI adds, lists by ID, and summarizes in project order", async () => {
     expect((await loadEntries(file)).length).toBe(2);
   } finally {
     log.mockRestore();
+  }
+});
+
+test("existing writer lock explicitly rejects a competing process without altering entries", async () => {
+  const file = await fixture();
+  await mkdir(`${file}.lock`);
+  const competing = Bun.spawn([process.execPath, "run", "src/cli.ts", "--file", file, "add", "2024-02-29", "violet", "60", "contender"], {
+    cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+  });
+  const [exit, stderr] = await Promise.all([competing.exited, new Response(competing.stderr).text()]);
+  expect(exit).not.toBe(0);
+  expect(stderr).toContain("Another writer holds the entries lock");
+  expect(await loadEntries(file)).toEqual([]);
+  await rmdir(`${file}.lock`);
+  const successful = Bun.spawn([process.execPath, "run", "src/cli.ts", "--file", file, "add", "2024-02-29", "violet", "60", "winner"], {
+    cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+  });
+  const [success, stdout] = await Promise.all([successful.exited, new Response(successful.stdout).text()]);
+  expect(success).toBe(0);
+  expect(stdout).toContain("1\t2024-02-29\tviolet\t1m 0s\twinner");
+  expect((await loadEntries(file)).map(({ id, note }) => ({ id, note }))).toEqual([{ id: 1, note: "winner" }]);
+});
+
+test("simultaneous CLI writers never both report success without both entries", async () => {
+  const file = await fixture();
+  const run = (note: string) => Bun.spawn([process.execPath, "run", "src/cli.ts", "--file", file, "add", "2024-02-29", "violet", "1", note], {
+    cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+  });
+  const first = run("first");
+  const second = run("second");
+  const results = await Promise.all([first, second].map(async (process) => ({
+    exit: await process.exited,
+    stdout: await new Response(process.stdout).text(),
+    stderr: await new Response(process.stderr).text(),
+  })));
+  const entries = await loadEntries(file);
+  const successes = results.filter(({ exit }) => exit === 0);
+  expect(entries).toHaveLength(successes.length);
+  expect(entries.map(({ id }) => id)).toEqual(entries.length === 2 ? [1, 2] : [1]);
+  expect(entries.map(({ note }) => note).sort()).toEqual(successes.map(({ stdout }) => stdout.trim().split("\t")[4]!).sort());
+  for (const result of results.filter(({ exit }) => exit !== 0)) {
+    expect(result.stderr).toContain("Another writer holds the entries lock");
   }
 });

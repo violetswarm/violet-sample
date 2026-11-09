@@ -20,8 +20,10 @@ bun run typecheck
 
 Each command requires an explicit JSON file path. Missing files start empty; `add`
 creates or atomically replaces the file. An invalid existing file fails without
-overwriting it. Entries retain ascending numeric IDs; `list` displays ID order,
-and `summary` displays project totals in project-name order.
+overwriting it. Concurrent writers use a sibling `.lock` directory: a competing
+writer fails explicitly, and an abandoned lock must be removed manually after
+ensuring no writer is active. Entries retain ascending numeric IDs; `list` displays
+ID order, and `summary` displays project totals in project-name order.
 
 ```sh
 bun run src/cli.ts --file ./entries.json add 2024-02-29 violet 3600 "Ship CLI"
@@ -30,10 +32,11 @@ bun run src/cli.ts --file ./entries.json summary
 ```
 
 Dates must be real calendar dates written `YYYY-MM-DD`; project and note must be
-nonempty, and seconds must be a nonnegative safe integer. Each output row is
-tab-separated. `add` and `list` emit `id date project duration note`; `summary`
-emits `project duration`. Duration always uses minutes and seconds, even above
-one hour. Invalid arguments or corrupt storage cause a nonzero exit.
+nonempty and must not contain tabs or line breaks, and seconds must be a
+nonnegative safe integer. Each output row is tab-separated. `add` and `list`
+emit `id date project duration note`; `summary` emits `project duration`.
+Duration always uses minutes and seconds, even above one hour. Invalid arguments
+or corrupt storage cause a nonzero exit.
 
 ## Future smoke change
 
